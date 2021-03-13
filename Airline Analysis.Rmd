@@ -1,0 +1,458 @@
+---
+title: "Airline analysis"
+output: html_notebook
+---
+
+Bring in useful libraries 
+```{r}
+library(tidyverse)
+library(airportr)
+library(readxl)
+```
+
+
+Import data set 
+```{r}
+airline <- read.csv("https://graderdata.s3.amazonaws.com/airlines.csv")
+airline <- airline %>% select(., -X)
+```
+
+Use unique IATA codes to get City name using airportr package. Bind into dataframe.
+```{r}
+iataCodes <- unique(c(airline$Origin,airline$Dest))
+city_airport <- list()
+for( code in iataCodes){
+  city_airport <- append(city_airport,
+                         airport_lookup(code, 
+                                        output_type = "city"))
+}
+
+city_airport <- do.call(rbind.data.frame, city_airport)
+colnames(city_airport) <- "city_name"
+code_to_city <- cbind.data.frame(iataCodes,city_airport)
+
+```
+
+Combine the Metropolitan growth area information with the city names acquired from the IATA codes. 
+Data is first imported, then cleaned to standardize names and characters.
+The city name is then matched without non-letter characters, and with the state name removed. 
+Some cities had to be manually coerced due to errors in the databases or semantic differences. 
+The code_to_growth table links IATA codes, the city name and information on metro-area population and growth.
+
+MetroPopGrowth.xlsx information can be copied from the table on this page:
+https://en.wikipedia.org/wiki/List_of_metropolitan_statistical_areas#United_States 
+```{r}
+city_growth <- read_xlsx("MetroPopGrowth.xlsx")
+city_growth <- city_growth %>% mutate(., `% change` = as.numeric(gsub("−","-",gsub("%","",`% change`)))) %>% 
+  mutate(., `% change` = if_else(`% change` <0, `% change`/100,`% change`)) %>% 
+  mutate(., growth_rank = min_rank(desc(city_growth$`% change`)))
+
+growth_cities <- gsub("\\-|\\–|\\,|\\-"," ", city_growth$`Metropolitan statistical area`)
+
+code_to_growth <- code_to_city %>% rowwise() %>% 
+              mutate(., city_name = gsub("\\-|\\–|\\,"," ",city_name)) %>%
+              mutate(., city_name = gsub("[A-Z]{2}","", city_name)) %>% 
+              mutate(., city_name = recode(city_name,
+                                           "Raleigh durham" = "Raleigh",
+                                           "Jacksn Hole" = "Jackson Hole",
+                                           "State College Pennsylvania" = "State College",
+                                           "L" = "Bristol")) %>% 
+              mutate(., regex_city = paste0("\\b",str_trim(city_name, side = "both"),"\\b")) %>% 
+              mutate(., city_in_growth = any(grepl(regex_city,growth_cities, 
+                                              ignore.case = T)),
+                        city_index = if(city_in_growth){grep(regex_city,growth_cities, 
+                                          ignore.case = T, value = F)[1]} else{NA},
+                        city_index_logical = if(is.na(city_index)){F}else{T}
+                     ) %>% 
+              mutate(., 
+                city_name = if(city_index_logical){
+                  growth_cities[city_index]}else{NA},
+                city_2010_pop = if(city_index_logical){
+                  city_growth$`2010 Census`[city_index]}else{NA},
+                city_2019_pop = if(city_index_logical){
+                  city_growth$`2019 estimate`[city_index]}else{NA},
+                city_growth_rate = if(city_index_logical){
+                  city_growth$`% change`[city_index]}else{NA},
+                city_growth_rank = if(city_index_logical){
+                  city_growth$growth_rank[city_index]}else{NA}
+              )
+                
+```
+
+
+Integrating more information sources
+
+Highest Growth Cities in 2018-2019
+https://www.census.gov/library/visualizations/2020/demo/fastest-growing-cities-2018-2019.html 
+
+Coronavirus specific high growth cities based on LinkedIn analysis. Accessible through Full Report avalible in sidebar.
+https://www.mckinsey.com/featured-insights/future-of-work/the-future-of-work-after-covid-19
+
+Locations primed for post pandemic Travel from RENTCafe and Forbes.
+https://www.forbes.com/sites/laurabegleybloom/2020/05/20/america-best-places-travel-beaches-small-towns/?sh=2dd239bb7e3a 
+
+Information for the hub.xlsx can be found here:
+https://www.airfarewatchdog.com/blog/50066526/airline-hub-guide-which-u-s-cities-are-major-hubs-and-why-it-matters/ 
+```{r}
+census_growth <- c("AUS", "RDU","SMF","MIA","TUL","BOI","AUS","PHX", "AUS","SAT","SEA","DFW","DAL","RSW","SLC","DEN","SJC")
+
+mckinsey_ln <- c("MSN","JAX","SLC","SMF", "RIC","MKE","CHS","ORF", "BDL", "CLE", "GSO", "MCI", "OKC", "TPA","MSP")
+
+vacation_airports <- c('ORF', 'MIA', 'MCO', 'LAS', 'LAX', 'FAI', 'ANC', 'HNL', 'LIH', 'ITO', 'OGG', 'KOA', 'MKK', 'LNY', 'FLL', 'TPA', 'RSW', 'PBI', 'SFB', 'PIE', 'SRQ', 'PGD', 'EYW', 'DAB', 'STT', 'STX', 'SJU', 'BQN', 'PSE')
+
+hubs <- read_xlsx("hubs.xlsx")
+```
+
+
+More data munging
+airport_metrogrowth takes the airline dataset, summaries the number of flights arriving or leaving a particular airport and attaches information about the metro-area from the code_to_growth dataframe. 
+
+airports_of_interest filters airport_metrogrowth for airports in cities which have population information, about 55% of the airports. Next, 3 columns are added indicating if the airport is considered a hub, what airline uses it as a hub, and what report highlights that city as experiencing population growth. 
+```{r}
+airport_metrogrowth <- airline %>% 
+  pivot_longer(., c(Origin, Dest), "loc_type", values_to = "loc_IATA") %>% 
+  group_by(., loc_IATA) %>% 
+  summarise(., numb_flights_interacting = n()) %>% 
+  left_join(., code_to_growth, by = c("loc_IATA" = "iataCodes"))
+
+airports_of_interest <- airport_metrogrowth %>% 
+   filter(.,!is.na(city_growth_rate)) %>%
+  rename(., `Metro-Area Growth Rate (%)` = city_growth_rate) %>%
+  mutate(., `Metro-Area Growth Rate (%)` = `Metro-Area Growth Rate (%)` *100) %>%
+  left_join(., hubs, by = c("loc_IATA" = "AirportCode")) %>% 
+  mutate(., in_census = if_else(loc_IATA %in% census_growth, 1, 0)) %>%
+  mutate(., in_mckinsey = if_else(loc_IATA %in% mckinsey_ln, 1, 0)) %>%
+  rowwise() %>%
+  mutate(., Reports = if (in_census + in_mckinsey == 2) {
+    "Both"
+  } else if(in_mckinsey ==1){
+    "LinkedIn: Growth during Pandemic"
+  } else if(in_census ==1){
+    "Census: Growth from 2018-19"
+  } else{
+    "No Mention"
+  })
+
+```
+
+
+Bringing together the flight data and information on the metropolitan statistical areas we can plot number of flights against city population.
+Change in population from 2010 to 2019 was plotted as the color of the points. 
+Graphs show this information normally and with a log transformation of both axis. 
+```{r}
+all_ports <- airport_metrogrowth %>% 
+  filter(., !is.na(city_growth_rate)) %>% 
+  rename(., `Metro-Area Growth Rate (%)` = city_growth_rate) %>% 
+  mutate(., `Metro-Area Growth Rate (%)` = `Metro-Area Growth Rate (%)`*100) %>% 
+  ggplot(., aes(x=city_2019_pop, y = numb_flights_interacting, col = `Metro-Area Growth Rate (%)`)) +
+  geom_point() +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans="log10") +
+  scale_color_continuous() +
+  theme_bw() +
+  labs(title = "Metropolitan Area Population vs Total Flights", 
+       x="Log Population of Metropolitan Statistical Area", 
+       y= "Log Inbound and Outbound Flights",
+       col = "Change in Population (%)") +
+  scale_color_gradient2(low = "blue", high = "red", mid = "grey", midpoint = mean(city_growth$`% change`)*100) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal")
+all_ports
+#ggsave("all_ports_growthrate.png", all_ports)
+
+
+# non log version
+all_ports_nonlog <- airport_metrogrowth %>% 
+  filter(., !is.na(city_growth_rate)) %>% 
+  rename(., `Metro-Area Growth Rate (%)` = city_growth_rate) %>% 
+  mutate(., `Metro-Area Growth Rate (%)` = `Metro-Area Growth Rate (%)`*100) %>% 
+  ggplot(., aes(x=city_2019_pop, y = numb_flights_interacting, col = `Metro-Area Growth Rate (%)`)) +
+  geom_point() +
+  scale_color_continuous() +
+  labs(title = "Metropolitan Area Population vs Total Flights", 
+       x="Population of Metropolitan Statistical Area", 
+       y= "Inbound and Outbound Flights",
+       col = "Change in Population (%)") +
+  scale_color_gradient2(low = "blue", high = "red", mid = "grey", midpoint = mean(city_growth$`% change`)*100) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal")
+all_ports_nonlog
+
+``` 
+
+These are the historical hubs used by all the airline companies. Most are Southwest's due to their distributed network but they generally skew toward the largest cities. These are not necessarily the fastest growing cities though so the upside to maintaining a presence in these cities is limited. 
+```{r}
+important_ports <- airports_of_interest %>% 
+  ggplot(.) +
+  geom_point(aes(x = city_2019_pop, 
+                 y = numb_flights_interacting ),
+             alpha = 0.2) +
+  geom_point(data = subset(airports_of_interest, !is.na(PrimaryHub) & !is.na(FocusCity)), #all cities
+             aes(x = city_2019_pop, 
+                 y = numb_flights_interacting,
+                 col = "black"),
+             col = "black"
+             ) +
+  geom_point(data = subset(airports_of_interest, PrimaryHub == 1), # only primary hub
+             aes(x = city_2019_pop, 
+                 y = numb_flights_interacting,
+                 col = "black"),
+             col = "black") +
+  theme_bw() +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log10") +
+  labs(title = "Metropolitan Area Population vs Total Flights: Principal Ports",
+       x = "Log Population of Metropolitan Statistical Area",
+       y = "Log Inbound and Outbound Flights",
+       col = "Hub Cities for all Airlines") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) 
+
+important_ports
+#ggsave("important_ports.png", important_ports)
+
+```
+
+
+While the population of the city is interesting, replacing the x-axis with the change in population of the city is more useful in making future decisions. While hub airports are generally located in the largest cities, they are not generally the 'up and coming' areas they once were.
+There are some high growth cities such as Austin, Raliegh, Orlando which are already hub/focus cities, but others have high growth but are not currently hubs such as Myrtle beach SC, Midland TX, Fort Meyers FL, Charleston SC.
+```{r}
+growth_v_flights <- airports_of_interest %>% 
+  ggplot(., aes(x=`Metro-Area Growth Rate (%)`, y = numb_flights_interacting,
+                alpha = 0.2
+                )) +
+  geom_point() +
+  geom_point(data = subset(airports_of_interest, !is.na(PrimaryHub) & !is.na(FocusCity)), #all cities
+             aes(x = `Metro-Area Growth Rate (%)`, 
+                 y = numb_flights_interacting),
+             alpha = 1) +
+  scale_color_continuous() +
+  
+  labs(title = "Metropolitan Area Growth vs Total Flights: Principal Ports", 
+       x="Percent Populaton Increase from 2010 to 2019", 
+       y= "Log Inbound and Outbound Flights") +
+  theme_bw() +
+  scale_y_continuous(breaks = c(20, 1000, 800000),
+                     trans = "log") +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+growth_v_flights
+#ggsave("growth_v_flights.png", growth_v_flights)
+
+```
+
+
+Change in population and 2019 population are negatively correlated but 2019 Population is heavily right-skewed.
+However, there are cities such Phoenix, Houston, and Dallas-Fort Worth which have sizable populations and nearly 20% increases in population. 
+```{r}
+pop_v_growth <- airports_of_interest %>% 
+  ggplot(., aes(y=`Metro-Area Growth Rate (%)`, x = city_2019_pop)) +
+  geom_text(aes(label=loc_IATA)) +
+  labs(title = "Metropolitan Area Growth vs Population", 
+       y="Percent 2010-19 Population Change of Metropolitan Statistical Area", 
+       x= "Population of Metropolitan Statistical Area") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom",
+        legend.direction = "horizontal")
+pop_v_growth
+#ggsave("pop_v_growth.png", pop_v_growth)
+```
+
+
+We wanted to codify an analysis which allowed us to look at airports with an underserved customer base, where there was a high expected population increase.
+These cutoffs, 10% population change, 50% of flights are provided by one airline company.
+Some interesting airports were SAT in San Antonio, near fast-growing Austin. Another was SRQ in Sarasota, FL which is outside Tampa, has a large increase in population and stands to gain with increased vacation travel. 
+```{r}
+# criteria as decimals
+pop_change_cutoff <- 0.1 
+service_saturation_cutoff <- 0.5
+
+
+airline %>% 
+  pivot_longer(., c(Origin, Dest), "loc_type", values_to = "loc_IATA") %>% 
+  left_join(., airports_of_interest, by = c("loc_IATA" = "loc_IATA")) %>% 
+  group_by(., AirlineCompany.x, loc_IATA) %>% 
+  summarise(., number_flights = n(),
+            pop_2019 = mean(city_2019_pop),
+            growth_rate = mean(`Metro-Area Growth Rate (%)`)) %>% 
+  group_by(loc_IATA) %>% 
+  mutate(., percent_service_saturation = number_flights / sum(number_flights)) %>% 
+  filter(., growth_rate > pop_change_cutoff*100,
+            percent_service_saturation > service_saturation_cutoff) %>% 
+  arrange(., desc(percent_service_saturation))
+
+```
+
+
+It might be misleading to look at the Metropolitan Statistical Area (very large tracks of land, and a broad brush), additionally our data contains the decade change in population. For a more fine-grain analysis we sourced data from the Census examining growth rates from 2018-2019 and data from LinkedIn analyzed by McKinsey.
+- We pulled a US census data set for the fastest growing cities (not metro areas) and some recent linkedin data from Mckinsey, we can get a covid specific changes.
+- Sacramento are both mentioned in our data sets.
+- Madison WI has a high growth rate, hometown pride. 
+- Cities like NY, LA, and SF have negative rates.
+```{r}
+current_ports  <- airports_of_interest %>% 
+  ggplot(.,aes(x = city_2019_pop, 
+               y = numb_flights_interacting ),
+         alpha = 0.4)+
+  geom_point(data = airports_of_interest,
+             aes(x = city_2019_pop, 
+               y = numb_flights_interacting,
+               col = as.factor(Reports))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log10") +
+  scale_color_manual(values = c("Purple","Red","Blue","Grey")) +
+  theme_bw() +
+  labs(title = "Metropolitan Area Population vs Total Flights: Recently Growing Cities",
+       x = "Log Population of Metropolitan Statistical Area",
+       y = "Log Inbound and Outbound Flights",
+       col = " ") +
+  theme(
+    plot.title = element_text(hjust = 0.3),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) 
+current_ports
+#ggsave("current_ports.png", current_ports)          
+
+
+```
+
+
+Our thesis is that while business travel may never recover from the pandemic shock, there is a pent up demand for travel which is likely to persist. By offering more flights and services to vacation destinations we can be better prepared to serve the customer. 
+```{r}
+vacation_ports <- airport_metrogrowth %>% 
+  ggplot(.) +
+  geom_point(aes(x = city_2019_pop, 
+               y = numb_flights_interacting),
+             alpha = 0.5) +
+  geom_point(data = subset( airport_metrogrowth, loc_IATA %in% vacation_airports),
+             aes(x = city_2019_pop, 
+               y = numb_flights_interacting),
+             col = "Green") +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log10") +
+  scale_color_manual(values = c("Purple","Red","Blue","Grey")) +
+  theme_bw() +
+  labs(title = "Metropolitan Area Population vs Total Flights: Vacation Destinations",
+       x = "Log Population of Metropolitan Statistical Area",
+       y = "Log Inbound and Outbound Flights",
+       col = "Vacation Linked Airport") +
+  theme(
+    plot.title = element_text(hjust = 0.3),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) 
+vacation_ports
+#ggsave("vacation_ports.png", vacation_ports)
+```
+
+
+We wanted to examine if coupons could be a viable way to nudge consumers toward travel behavior that would help balance fleet capacity. We can see from an initial EDA that for most airline companies, coupons are poorly correlated with price. More coupons are only available on flights ~$50 greater than 1 coupon flights. 
+```{r}
+violin_coupons <- airline %>% 
+  mutate(., AirlineCompany = recode(AirlineCompany,
+                                    "AA" = "American Airlines",
+                                    "DL" = "Delta Airlines",
+                                    "UA" = "United Airlines",
+                                    "WN" = "Southwest Airlines"),
+         Coupons_Avalible = as.factor(MktCoupons)) %>% 
+ggplot(., aes(x=Coupons_Avalible, y = PricePerTicket)) +
+  #geom_violin() +
+  geom_boxplot(#width = 0.1, 
+    outlier.alpha = 0) +
+  facet_wrap(~AirlineCompany) +
+  labs(title = "Ticket Price by Coupons Avalible",
+       x = "Number of Coupons in Market for Flight",
+       y = "Price Per Ticket")
+violin_coupons
+#ggsave("violin_coupons.png", violin_coupons)
+```
+
+
+Of note is that while all flights shown had at least a 1 in the MktCoupons feature, only 3% had 2 or 3 coupons. Due to the poor documentation surrounding the feature we are not confident in what it represents.
+```{r}
+hist_coupons_avalible <- airline %>% 
+  mutate(., AirlineCompany = recode(AirlineCompany,
+                                    "AA" = "American Airlines",
+                                    "DL" = "Delta Airlines",
+                                    "UA" = "United Airlines",
+                                    "WN" = "Southwest Airlines"),
+        Coupons_Avalible = as.factor(MktCoupons),
+        route = ifelse(Origin < Dest, paste(Origin, Dest), paste(Dest, Origin))) %>% 
+  group_by(AirlineCompany, route) %>%  
+  ggplot(.) +
+  geom_histogram(stat = "count",aes(x= Coupons_Avalible)) +
+  facet_wrap(~AirlineCompany)
+hist_coupons_avalible
+#ggsave("hist_coupons_avalible.png", hist_coupons_avalible)
+```
+
+
+We wanted to determine if coupons were correlated with a specific route of if it was more random. 
+Shown below is the number of coupons available per flight on each unique route. For instance, if there are 20 flights from AUS to ORD and there are 20 coupons avalible (sum of MktCoupons) then the average is 1, same if each flight had 2 coupons (20 flights, 40 coupons). So we can see that for American, Delta, and United most routes have 1 or 2 tickets avalible for each flight (not a mixture). Southwest has a more mixed option and that matches with them offering slightly more flights with 2 MktCoupons. 
+```{r}
+airline %>% 
+  mutate(., route = ifelse(Origin < Dest, paste(Origin, Dest), paste(Dest, Origin)),
+            AirlineCompany = recode(AirlineCompany,
+                                    "AA" = "American Airlines",
+                                    "DL" = "Delta Airlines",
+                                    "UA" = "United Airlines",
+                                    "WN" = "Southwest Airlines")) %>% 
+  group_by(AirlineCompany, route) %>%  
+  summarise(., numb_flights = n(),
+            coupons_per_flight = sum(MktCoupons)/n(),
+            avg_cost = mean(PricePerTicket)) %>% 
+  ggplot(., aes(x=avg_cost,y=coupons_per_flight)) +
+  geom_point() +
+  facet_wrap(~ AirlineCompany)
+
+```
+
+Here is the same analysis but in a table form. 
+```{r}
+airline %>% 
+  mutate(., route = ifelse(Origin < Dest, paste(Origin, Dest), paste(Dest, Origin))) %>% 
+  group_by(AirlineCompany, route) %>%  
+  summarise(., numb_flights = n(),
+            coupons_per_flight = sum(MktCoupons)/n(),
+            avg_cost = mean(PricePerTicket)) %>% 
+  filter(., coupons_per_flight >1) %>% 
+  arrange(., desc(coupons_per_flight))
+```
+
+
+One area we would have liked to explore is the opportunity to shift prices based on the offer of the competition. Here we can see the average price of a ticket on a specific route for each of the major carriers.
+```{r}
+#General Implementation.
+airline %>% 
+  mutate(., route = ifelse(Origin < Dest, paste(Origin, Dest), paste(Dest, Origin))) %>% 
+  group_by(AirlineCompany, route) %>%  
+  summarise(., numb_flights = n(),
+            coupons_per_flight = sum(MktCoupons)/n(),
+            avg_cost = mean(PricePerTicket)) %>% 
+  pivot_wider(., id_cols = route, names_from =AirlineCompany, names_prefix = "Company_", values_from = avg_cost)
+```
+
+
+We wanted to take a look at one of our case study cities so we looked at just Austin to Chicago flights.
+```{r}
+
+#looking specifically at Ausitn
+airline %>% 
+  mutate(., route = ifelse(Origin < Dest, paste(Origin, Dest), paste(Dest, Origin))) %>% 
+  group_by(AirlineCompany, route) %>%  
+  summarise(., numb_flights = n(),
+            coupons_per_flight = sum(MktCoupons)/n(),
+            avg_cost = mean(PricePerTicket)) %>% 
+  pivot_wider(., id_cols = route, names_from =AirlineCompany, names_prefix = "Company_", values_from = avg_cost) %>% 
+  filter(., grepl("AUS",route)) %>% 
+  filter(., grepl("ORD",route) | grepl("MDW",route))
+
+```
