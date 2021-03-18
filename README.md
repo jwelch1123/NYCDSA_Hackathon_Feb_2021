@@ -5,4 +5,5 @@ The Thirty Thousand Foot View for Restructuring Air Travel Post-COVID. February 
 Every quarter the New York Data Science Academy hosts a hackathon for its students.
 Ryan Kniewel and James Welch collaborated on this project and were ranked 1st.
 
-Included are our working documents, presentations and a copy of our blog post which you can find online. 
+Included are our working documents, presentations and a copy of our blog post which you can find online at the URL below.
+https://nycdatascience.com/blog/student-works/a-thirty-thousand-foot-view-of-air-travel-post-covid/ 
